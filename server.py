@@ -14,15 +14,27 @@ CORS(app)
 
 MODEL_FILE = "captcha_v4_native.pth"
 
-# Ganti URL ini jika Anda meng-upload model ke Google Drive / Catbox / Dropbox / direct link
-MODEL_DOWNLOAD_URL = os.environ.get("MODEL_URL", "")
+# Direct URL download model dari GitHub Release
+MODEL_DOWNLOAD_URL = os.environ.get(
+    "MODEL_URL", 
+    "https://github.com/jihanala9-del/solv/releases/download/v1.0/captcha_v4_native.pth"
+)
 
 def ensure_model_exists():
     if not os.path.exists(MODEL_FILE):
         if MODEL_DOWNLOAD_URL:
             print(f"Downloading model from {MODEL_DOWNLOAD_URL}...")
-            urllib.request.urlretrieve(MODEL_DOWNLOAD_URL, MODEL_FILE)
-            print("Model downloaded successfully!")
+            try:
+                # Add User-Agent header so GitHub allows direct download
+                req = urllib.request.Request(
+                    MODEL_DOWNLOAD_URL, 
+                    headers={'User-Agent': 'Mozilla/5.0'}
+                )
+                with urllib.request.urlopen(req) as response, open(MODEL_FILE, 'wb') as out_file:
+                    out_file.write(response.read())
+                print("Model downloaded successfully!")
+            except Exception as e:
+                print("Error downloading model:", e)
         else:
             print(f"Warning: {MODEL_FILE} not found locally and MODEL_URL is not set.")
 
