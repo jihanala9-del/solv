@@ -13,32 +13,10 @@ app = Flask(__name__)
 CORS(app)
 
 MODEL_FILE = "captcha_v4_native.pth"
-
-# Direct URL download model dari GitHub Release
 MODEL_DOWNLOAD_URL = os.environ.get(
     "MODEL_URL", 
     "https://github.com/jihanala9-del/solv/releases/download/v1.0/captcha_v4_native.pth"
 )
-
-def ensure_model_exists():
-    if not os.path.exists(MODEL_FILE):
-        if MODEL_DOWNLOAD_URL:
-            print(f"Downloading model from {MODEL_DOWNLOAD_URL}...")
-            try:
-                # Add User-Agent header so GitHub allows direct download
-                req = urllib.request.Request(
-                    MODEL_DOWNLOAD_URL, 
-                    headers={'User-Agent': 'Mozilla/5.0'}
-                )
-                with urllib.request.urlopen(req) as response, open(MODEL_FILE, 'wb') as out_file:
-                    out_file.write(response.read())
-                print("Model downloaded successfully!")
-            except Exception as e:
-                print("Error downloading model:", e)
-        else:
-            print(f"Warning: {MODEL_FILE} not found locally and MODEL_URL is not set.")
-
-ensure_model_exists()
 
 PERMUTATIONS = [
     (0, 1, 2), (0, 2, 1), (1, 0, 2),
@@ -60,6 +38,42 @@ TARGET_COORDS = [
     {'x': 400, 'y': 230}   # Bottom (2)
 ]
 
+device = torch.device("cpu")
+model = None
+
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+def get_model():
+    global model
+    if model is not None:
+        return model
+
+    if not os.path.exists(MODEL_FILE):
+        if MODEL_DOWNLOAD_URL:
+            print(f"Downloading model from {MODEL_DOWNLOAD_URL}...")
+            try:
+                req = urllib.request.Request(
+                    MODEL_DOWNLOAD_URL, 
+                    headers={'User-Agent': 'Mozilla/5.0'}
+                )
+                with urllib.request.urlopen(req) as response, open(MODEL_FILE, 'wb') as out_file:
+                    out_file.write(response.read())
+                print("Model downloaded successfully!")
+            except Exception as e:
+                print("Error downloading model:", e)
+
+    m = models.resnet34()
+    m.fc = nn.Linear(m.fc.in_features, 6)
+    if os.path.exists(MODEL_FILE):
+        m.load_state_dict(torch.load(MODEL_FILE, map_location=device))
+        print("Model loaded successfully!")
+    m.eval()
+    model = m
+    return model
+
 def detect_node_color(img, x, y):
     pixel = img.getpixel((x, y))[:3]
     best_color = None
@@ -71,31 +85,14 @@ def detect_node_color(img, x, y):
             best_color = name
     return best_color
 
-print("Loading Captcha AI Model...")
-device = torch.device("cpu")
-model = models.resnet34()
-model.fc = nn.Linear(model.fc.in_features, 6)
-
-if os.path.exists(MODEL_FILE):
-    model.load_state_dict(torch.load(MODEL_FILE, map_location=device))
-    print("Model loaded successfully!")
-else:
-    print("Model file not found. Ready to receive MODEL_URL.")
-
-model.eval()
-
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "running", "model_loaded": os.path.exists(MODEL_FILE)})
+    return jsonify({"status": "online", "service": "Captcha V4 Solver API"})
 
 @app.route("/solve", methods=["POST"])
 def solve_api():
     try:
+        net = get_model()
         data = request.json
         image_b64 = data.get("image")
         prompt_text = data.get("prompt", "")
@@ -113,7 +110,6 @@ def solve_api():
         if img.size != (450, 280):
             img = img.resize((450, 280), Image.BILINEAR)
 
-        # 1. Deteksi warna kiri & kanan
         left_nodes = [
             detect_node_color(img, 50, 50),
             detect_node_color(img, 50, 140),
@@ -125,10 +121,9 @@ def solve_api():
             detect_node_color(img, 400, 230)
         ]
 
-        # 2. Prediksi AI Tracing
         tensor = transform(img).unsqueeze(0)
         with torch.no_grad():
-            output = model(tensor)
+            output = net(tensor)
             pred_class = output.argmax(dim=1).item()
 
         mapping_tuple = PERMUTATIONS[pred_class]
@@ -167,4 +162,4 @@ def solve_api():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
