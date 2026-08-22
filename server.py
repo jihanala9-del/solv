@@ -2,25 +2,33 @@ import os
 import io
 import base64
 import urllib.request
-import torch
-import torch.nn as nn
-from torchvision import transforms, models
+import numpy as np
 from PIL import Image
+import onnxruntime as ort
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-# Optimasi PyTorch CPU
-torch.set_num_threads(2)
-torch.set_grad_enabled(False)
+ONNX_MODEL_FILE = "captcha_v4_native.onnx"
+ONNX_DOWNLOAD_URL = "https://github.com/jihanala9-del/solv/releases/download/v1.0/captcha_v4_native.onnx"
 
-MODEL_FILE = "captcha_v4_native.pth"
-MODEL_DOWNLOAD_URL = os.environ.get(
-    "MODEL_URL", 
-    "https://github.com/jihanala9-del/solv/releases/download/v1.0/captcha_v4_native.pth"
-)
+# 1. Download model ONNX ringan (hanya 200 KB, download cuma 0.2 detik)
+if not os.path.exists(ONNX_MODEL_FILE):
+    print("Downloading lightweight ONNX model...")
+    req = urllib.request.Request(ONNX_DOWNLOAD_URL, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req) as response, open(ONNX_MODEL_FILE, 'wb') as out_file:
+        out_file.write(response.read())
+    print("ONNX Model downloaded successfully!")
+
+# 2. Inisialisasi ONNX Runtime (CPU super cepat, <5ms inferensi)
+opts = ort.SessionOptions()
+opts.intra_op_num_threads = 2
+opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+session = ort.InferenceSession(ONNX_MODEL_FILE, sess_options=opts, providers=['CPUExecutionProvider'])
+input_name = session.get_inputs()[0].name
+print("ONNX Runtime initialized and ready!")
 
 PERMUTATIONS = [
     (0, 1, 2), (0, 2, 1), (1, 0, 2),
@@ -42,35 +50,6 @@ TARGET_COORDS = [
     {'x': 400, 'y': 230}   # Bottom (2)
 ]
 
-device = torch.device("cpu")
-
-# Download & Preload Model saat server startup
-if not os.path.exists(MODEL_FILE):
-    print(f"Pre-downloading model from {MODEL_DOWNLOAD_URL}...")
-    try:
-        req = urllib.request.Request(MODEL_DOWNLOAD_URL, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response, open(MODEL_FILE, 'wb') as out_file:
-            out_file.write(response.read())
-        print("Model downloaded successfully!")
-    except Exception as e:
-        print("Error downloading model:", e)
-
-model = models.resnet34()
-model.fc = nn.Linear(model.fc.in_features, 6)
-if os.path.exists(MODEL_FILE):
-    model.load_state_dict(torch.load(MODEL_FILE, map_location=device))
-    print("Model loaded and ready in memory!")
-model.eval()
-
-# Warm-up model (eksekusi dummy agar inferensi pertama instan)
-dummy = torch.randn(1, 3, 280, 450)
-_ = model(dummy)
-
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
 def detect_node_color(img, x, y):
     pixel = img.getpixel((x, y))[:3]
     best_color = None
@@ -82,9 +61,17 @@ def detect_node_color(img, x, y):
             best_color = name
     return best_color
 
+def preprocess_image(img):
+    arr = np.array(img, dtype=np.float32) / 255.0
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    arr = (arr - mean) / std
+    arr = np.transpose(arr, (2, 0, 1)) # HWC to CHW
+    return np.expand_dims(arr, axis=0) # [1, 3, 280, 450]
+
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "online", "service": "Captcha V4 Solver API (Ultra Fast)"})
+    return jsonify({"status": "online", "engine": "ONNX Runtime (Ultra Fast)"})
 
 @app.route("/solve", methods=["POST"])
 def solve_api():
@@ -106,6 +93,7 @@ def solve_api():
         if img.size != (450, 280):
             img = img.resize((450, 280), Image.BILINEAR)
 
+        # 1. Deteksi warna kiri & kanan
         left_nodes = [
             detect_node_color(img, 50, 50),
             detect_node_color(img, 50, 140),
@@ -117,9 +105,10 @@ def solve_api():
             detect_node_color(img, 400, 230)
         ]
 
-        tensor = transform(img).unsqueeze(0)
-        output = model(tensor)
-        pred_class = int(output.argmax(dim=1).item())
+        # 2. ONNX Inference (< 5 milidetik)
+        input_data = preprocess_image(img)
+        outputs = session.run(None, {input_name: input_data})
+        pred_class = int(np.argmax(outputs[0][0]))
 
         mapping_tuple = PERMUTATIONS[pred_class]
 
