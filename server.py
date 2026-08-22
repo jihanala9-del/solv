@@ -12,7 +12,6 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# Optimasi PyTorch CPU
 torch.set_num_threads(2)
 torch.set_grad_enabled(False)
 
@@ -40,36 +39,33 @@ TARGET_COORDS = [
 ]
 
 device = torch.device("cpu")
-model = None
+
+# Download & Load Model saat startup server
+if not os.path.exists(MODEL_FILE):
+    print(f"Downloading {MODEL_FILE}...")
+    try:
+        req = urllib.request.Request(MODEL_DOWNLOAD_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as resp, open(MODEL_FILE, 'wb') as f:
+            f.write(resp.read())
+        print("Download completed!")
+    except Exception as e:
+        print("Download error:", e)
+
+model = models.resnet34()
+model.fc = nn.Linear(model.fc.in_features, 6)
+if os.path.exists(MODEL_FILE):
+    model.load_state_dict(torch.load(MODEL_FILE, map_location=device))
+    print("Model ResNet34 loaded successfully in memory!")
+model.eval()
+
+# Warm-up
+dummy = torch.randn(1, 3, 280, 450)
+_ = model(dummy)
 
 transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
-
-def get_model():
-    global model
-    if model is not None:
-        return model
-
-    if not os.path.exists(MODEL_FILE):
-        print(f"Downloading {MODEL_FILE}...")
-        try:
-            req = urllib.request.Request(MODEL_DOWNLOAD_URL, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as resp, open(MODEL_FILE, 'wb') as f:
-                f.write(resp.read())
-            print("Download completed!")
-        except Exception as e:
-            print("Download error:", e)
-
-    m = models.resnet34()
-    m.fc = nn.Linear(m.fc.in_features, 6)
-    if os.path.exists(MODEL_FILE):
-        m.load_state_dict(torch.load(MODEL_FILE, map_location=device))
-        print("Model PyTorch loaded successfully!")
-    m.eval()
-    model = m
-    return model
 
 def detect_node_color(img, x, y):
     pixel = img.getpixel((x, y))[:3]
@@ -84,12 +80,11 @@ def detect_node_color(img, x, y):
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "online", "service": "Captcha V4 PyTorch API"})
+    return jsonify({"status": "online", "service": "Captcha V4 PyTorch API (Fast)"})
 
 @app.route("/solve", methods=["POST"])
 def solve_api():
     try:
-        net = get_model()
         data = request.json
         image_b64 = data.get("image")
         prompt_text = data.get("prompt", "")
@@ -119,7 +114,7 @@ def solve_api():
         ]
 
         tensor = transform(img).unsqueeze(0)
-        output = net(tensor)
+        output = model(tensor)
         pred_class = int(output.argmax(dim=1).item())
 
         mapping_tuple = PERMUTATIONS[pred_class]
